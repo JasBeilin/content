@@ -12,6 +12,72 @@ commands:
           command: |
             echo 'export INSTANCE_ROLE="<< parameters.instance_role >>"' >> $BASH_ENV
             source $BASH_ENV
+  start-tunnel:
+    description: "Opens an ssh tunnel to the demisto servers and wait until the tunnels are established"
+    parameters:
+      timeout:
+        type: integer
+        default: 10
+    steps:
+      - run:
+          name: Open SSH Tunnel
+          command: |
+            if [ -z $INSTANCE_WAS_CREATED ];
+              then
+                echo "Skipping - instance was not created"
+                exit 0
+            fi
+            # Generating lines with the following form: <instance-ip>\t<tunnel-port>
+            IPS_AND_PORTS=$(cat ./env_results.json | jq ".[] | select(.Role==\"$INSTANCE_ROLE\")" | jq -r '[.InstanceDNS, .TunnelPort] | @tsv' | sed "s/\"//g")
+            echo $IPS_AND_PORTS | while read IP_AND_PORT;
+            do
+              # Capturing the IP
+              IP=$(echo $IP_AND_PORT | grep -o -E "10\.0\.[0-9]{1,3}\.[0-9]{1,3}")
+              # Capturing the port
+              PORT=$(echo $IP_AND_PORT | grep -o -E "[0-9]{4}")
+              ssh -4 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -f -N "ec2-user@LB-BastionContentBuild-17dd64ef8d0c8b2e.elb.us-west-2.amazonaws.com" -L "$PORT:$IP:443"
+            done
+          background: true
+      - run:
+          name: Wait for tunnel establishment and add ssh configurations
+          shell: /bin/bash
+          command: |
+            if [ -z $INSTANCE_WAS_CREATED ];
+              then
+                echo "Skipping - instance was not created"
+                exit 0
+            fi
+            # Generating lines with the following form: <instance-ip>\t<tunnel-port>
+            IPS_AND_PORTS=$(cat ./env_results.json | jq ".[] | select(.Role==\"$INSTANCE_ROLE\")" | jq -r '[.InstanceDNS, .TunnelPort] | @tsv' | sed "s/\"//g")
+            echo $IPS_AND_PORTS | while read IP_AND_PORT;
+            do
+              # Capturing the IP
+              IP=$(echo $IP_AND_PORT | grep -o -E "10\.0\.[0-9]{1,3}\.[0-9]{1,3}")
+              # Capturing the port
+              PORT=$(echo $IP_AND_PORT | grep -o -E "[0-9]{4}")
+              COUNT=0
+              until nc -z 127.0.0.1 $PORT -v; do
+                if [ $COUNT -ge << parameters.timeout >> ]; then
+                  echo "ssh tunnel set up timeout on instance with ip $IP";
+                  exit 1;
+                fi;
+                ((COUNT++))
+                sleep 1
+              done
+            done
+            # Modifying ssh config file
+            echo "Host 10.0.*
+              StrictHostKeyChecking no
+              UserKnownHostsFile=/dev/null
+              CheckHostIP no
+              LogLevel ERROR
+              ProxyJump ec2-user@LB-BastionContentBuild-17dd64ef8d0c8b2e.elb.us-west-2.amazonaws.com
+             Host LB-BastionContentBuild-17dd64ef8d0c8b2e.elb.us-west-2.amazonaws.com
+              StrictHostKeyChecking no
+              UserKnownHostsFile=/dev/null
+              CheckHostIP no
+              LogLevel ERROR" >> ~/.ssh/config
+
 parameters:
   non_ami_run:
     type: string
@@ -761,6 +827,7 @@ jobs:
             - set-instance-role-env-variable:
                 instance_role: Server 5.0
             - *check_if_instance_was_created
+            - start-tunnel
             - *wait_until_server_ready
             - *install_content_and_configure_integrations_on_server
             - run:
@@ -810,6 +877,7 @@ jobs:
             - set-instance-role-env-variable:
                 instance_role: Server 5.5
             - *check_if_instance_was_created
+            - start-tunnel
             - *wait_until_server_ready
             - *install_content_and_configure_integrations_on_server
             - run:
@@ -859,6 +927,7 @@ jobs:
             - set-instance-role-env-variable:
                 instance_role: Server 6.0
             - *check_if_instance_was_created
+            - start-tunnel
             - *wait_until_server_ready
             - *install_content_and_configure_integrations_on_server
             - run:
@@ -898,6 +967,7 @@ jobs:
       - *prepare_environment
       - set-instance-role-env-variable
       - *check_if_instance_was_created
+      - start-tunnel
       - *wait_until_server_ready
       - *install_content_and_configure_integrations_on_server
       - run:
@@ -1013,18 +1083,8 @@ jobs:
       - *prepare_environment
       - set-instance-role-env-variable:
           instance_role: Server 5.5
+      - start-tunnel
       - *wait_until_server_ready
-      - run:
-          name: Wait until server ready
-          shell: /bin/bash
-          when: always
-          command: |
-            if [ -z $INSTANCE_TESTS ]
-            then
-              echo "Skipping, contributor branch not given."
-              exit 0
-            fi
-            python3 ./Tests/scripts/wait_until_server_ready.py "$INSTANCE_ROLE"
       - run:
           name: Instance Test
           command: |
@@ -1082,11 +1142,8 @@ jobs:
       - *download_configuration
       - *create_instance
       - set-instance-role-env-variable
+      - start-tunnel
       - *wait_until_server_ready
-      - run:
-          name: Wait until server ready
-          command: |
-            python3 ./Tests/scripts/wait_until_server_ready.py "Server Master"
       - run:
           name: Set Environment Variables
           command: |
@@ -1140,6 +1197,7 @@ jobs:
       - *prepare_environment
       - set-instance-role-env-variable:
           instance_role: Server 6.0
+      - start-tunnel
       - *wait_until_server_ready
       - run:
           name: Install Packs
@@ -1170,6 +1228,7 @@ jobs:
       - *add_ssh_keys
       - *prepare_environment
       - set-instance-role-env-variable
+      - start-tunnel
       - *wait_until_server_ready
       - run:
           name: Install Packs
